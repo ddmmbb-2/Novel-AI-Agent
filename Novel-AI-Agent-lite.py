@@ -353,7 +353,7 @@ class NovelAIAgent:
         novel_id = self.current_novel_id
 
         while self.is_running:
-            # 1. 取出當前小說狀態
+            # --- 準備階段：讀取資料庫狀態 ---
             c.execute("""SELECT setting, setting_record, event_record, foreshadow_record, 
                                 last_chap_summary, global_summary, saved_context 
                          FROM novels WHERE id=?""", (novel_id,))
@@ -364,71 +364,64 @@ class NovelAIAgent:
             next_chap = (max_chap or 0) + 1
 
             self.gui_log(f"\n=======================")
-            self.gui_log(f"📝 準備創作：第 {next_chap} 章")
+            self.gui_log(f"📝 開始執行循環：準備創作第 {next_chap} 章")
             
             # 動態提取風格標籤
             style_match = re.search(r'【作品風格走向】：(.*?)\n', setting)
             current_style = style_match.group(1) if style_match else "一般網文"
-            self.gui_log(f"🎭 鎖定作品風格：{current_style}")
 
-            # 2. 上文組成
+            # ==========================================
+            # 循環過程 1. 初始資料 + 三維資訊 + 上一章摘要 -> 寫下一章
+            # ==========================================
             if next_chap == 1:
-                context = f"【原始設定】：\n{setting}\n\n請根據設定撰寫第一章內容。"
+                self.gui_log("🌟 檢測為第一章，使用初始資料進行開局創作...")
+                context = f"【初始設定】：\n{setting}\n\n請根據以上設定，撰寫第一章正文。"
             else:
+                self.gui_log("📖 結合前一章三維資訊與摘要，進行延續創作...")
                 context = (
-                    f"【原始設定】：\n{setting}\n\n"
-                    f"【目前核心狀態與劇情彙整】：\n{global_summary}\n\n"
+                    f"【初始設定】：\n{setting}\n\n"
+                    f"【目前世界觀與全局狀態 (三維資訊)】：\n{global_summary}\n\n"
                     f"【上一章詳細摘要】：\n{last_chap_summary}\n\n"
-                    f"請根據以上資訊，緊密銜接上一章的劇情，撰寫第 {next_chap} 章正文。"
+                    f"請緊密銜接上一章的劇情，撰寫第 {next_chap} 章正文。"
                 )
             
+            # 儲存 Context 供除錯用
             c.execute("UPDATE novels SET saved_context = ? WHERE id = ?", (context, novel_id))
             self.conn.commit()
 
-            # ---------------------------------------------------------
-            # 【第 1 次 AI 呼叫：寫正文】
-            # ---------------------------------------------------------
             writer_sys_prompt = (
                 f"你是一位頂級的網路小說家。\n"
                 f"【最高指令】：本作品的核心風格為『{current_style}』！\n"
-                f"你的遣詞造句、人物對話、情境描寫與劇情節奏，都必須強烈展現且死死咬住這個風格，絕對不能寫成平庸無聊的流水帳。"
+                f"你的遣詞造句、情境描寫與劇情節奏，都必須死死咬住這個風格，絕對不能寫成平庸無聊的流水帳。"
             )
             content = self.call_ai_with_retry(f"第{next_chap}章正文", writer_sys_prompt, context)
             if not content:
                 self.gui_log("⚠️ 寫作多次失敗，為保護進度，自動暫停運行。")
                 self.stop_ai()
                 break
-            
-            # 🚨 移除 AI 標題命名，直接使用數字，節省算力
-            title = f"第{next_chap}章"
 
-            # 3. 存入新章節 (快照欄位此時先留空)
+            # --- 附加步驟：給 AI 命名標題 (防呆純文字版) ---
+            title_sys = "你是一個小說編輯。請根據內文為這章下一個吸引人的標題。請只輸出標題文字，不要加書名號、不要加上'第X章'、不要任何其他廢話。"
+            title_res = self.call_ai_with_retry("標題命名", title_sys, f"內文：{content[:1500]}")
+            clean_title = title_res.strip() if title_res else "無題"
+            full_title = f"第{next_chap}章 {clean_title}"
+
+            # --- 初步存檔 (標題與內文) ---
             c.execute("INSERT INTO chapters (novel_id, chapter_num, title, content) VALUES (?, ?, ?, ?)", 
-                      (novel_id, next_chap, title, content))
+                      (novel_id, next_chap, full_title, content))
             self.conn.commit()
-            
             self.root.after(0, self.refresh_chapter_list) 
-            self.gui_log(f"📦 {title} 初步存檔成功！")
+            self.gui_log(f"📦 正文存檔成功：《{full_title}》")
 
-            # ---------------------------------------------------------
-            # 【第 2 次 AI 呼叫：單章詳細摘要】
-            # ---------------------------------------------------------
-            self.gui_log("🧠 生成【單章詳細摘要】...")
-            single_sum_sys = (
-                f"你是一位極其細心的紀錄員。這部小說的風格是【{current_style}】。\n"
-                "請將這章內容濃縮為『單章詳細摘要』。除了記錄發生的事件、戰鬥與獲得物品外，"
-                "【重要】：請特別把『符合該風格的重要橋段或人物情緒反應』也記錄下來，不要只寫冷冰冰的流水帳。"
-            )
-            new_last_chap_summary = self.call_ai_with_retry("單章摘要", single_sum_sys, f"章節內容：\n{content}")
-
-            # ---------------------------------------------------------
-            # 【第 3 次 AI 呼叫：三維記憶與全局彙整 (4合1極速版)】
-            # ---------------------------------------------------------
-            self.gui_log("🌍 進行三維記憶與全局去重彙整 (單次呼叫加速中)...")
+            # ==========================================
+            # 循環過程 2. 剛剛寫的章節 -> 給 AI 彙整成三維資訊
+            # ==========================================
+            self.gui_log("🌍 讀取最新章節，提煉並更新三維資訊...")
             
             combo_sys = (
                 f"你是一位專業的劇情統籌編輯。這部小說的核心風格是：【{current_style}】。\n"
-                "請根據【舊有記憶】與【本章最新內容】，更新設定、事件與伏筆，並進行完美去重與精煉。\n"
+                "請根據【舊有三維資訊】與【剛寫好的最新章節】，更新並彙整出最新的三維資訊。\n"
+                "【第一次更新說明】：如果是第一章，舊有資訊會是空的，請直接根據正文建立起初始的三維狀態。\n"
                 "【最高指令】：請你嚴格按照以下四個標題依序輸出，保留體現風格的關鍵細節，不要有任何多餘的廢話：\n"
                 "### 【設定更新】\n"
                 "(寫入角色狀態、修為、裝備、世界觀等)\n"
@@ -437,43 +430,48 @@ class NovelAIAgent:
                 "### 【伏筆更新】\n"
                 "(保留未解伏筆，刪除已解開的)\n"
                 "### 【全局彙整】\n"
-                "(將上述三點融合成一段通順的全局劇情總覽)"
+                "(將上述三點融合成一段通順的全局劇情總覽，這將作為下一章的核心引導)"
             )
             
             combo_user = (
                 f"【舊有設定】：\n{setting_record}\n\n"
                 f"【舊有事件】：\n{event_record}\n\n"
                 f"【舊有伏筆】：\n{foreshadow_record}\n\n"
-                f"【本章正文】：\n{content}\n\n"
-                f"【本章詳細摘要】：\n{new_last_chap_summary}\n\n"
-                "請開始更新記憶庫："
+                f"【剛寫好的最新章節正文】：\n{content}\n\n"
+                "請開始更新三維資訊："
             )
 
-            memory_res = self.call_ai_with_retry("更新全局記憶庫", combo_sys, combo_user)
+            memory_res = self.call_ai_with_retry("更新三維資訊", combo_sys, combo_user)
             
-            # 預設沿用舊記憶 (以防解析失敗)
             new_setting, new_event, new_foreshadow, new_global_summary = setting_record, event_record, foreshadow_record, global_summary
             update_success = False
 
             if memory_res:
                 try:
-                    # 使用純文字標籤分割 (防呆切割法)
                     part1 = memory_res.split("### 【事件更新】")
                     new_setting = part1[0].replace("### 【設定更新】", "").strip()
-                    
                     part2 = part1[1].split("### 【伏筆更新】")
                     new_event = part2[0].strip()
-                    
                     part3 = part2[1].split("### 【全局彙整】")
                     new_foreshadow = part3[0].strip()
                     new_global_summary = part3[1].strip()
-                    
                     update_success = True
-                    self.gui_log("✅ 記憶庫分割解析成功！")
+                    self.gui_log("✅ 三維資訊更新成功！")
                 except Exception as e:
-                    self.gui_log(f"⚠️ 解析文字標籤失敗，保留舊記憶，下回合重試。")
+                    self.gui_log(f"⚠️ 三維資訊格式解析失敗，將保留舊有資訊。")
 
-            # 4. 更新小說設定表並建立【記憶快照】
+            # ==========================================
+            # 循環過程 3. 剛剛寫的章節 -> AI 彙整成單章詳細摘要
+            # ==========================================
+            self.gui_log("🧠 讀取最新章節，生成單章詳細摘要...")
+            single_sum_sys = (
+                f"你是一位極其細心的紀錄員。這部小說的風格是【{current_style}】。\n"
+                "請將這章內容濃縮為『單章詳細摘要』。除了記錄發生的事件外，"
+                "請務必保留『人物的決策、情緒反應與伏筆細節』，這將直接提供給下一章的作者作為上下文銜接。"
+            )
+            new_last_chap_summary = self.call_ai_with_retry("單章摘要生成", single_sum_sys, f"剛寫好的章節內容：\n{content}")
+
+            # --- 存檔三維資訊與摘要 (同步存入快照) ---
             if new_last_chap_summary and update_success:
                 c.execute("""UPDATE novels SET 
                              last_chap_summary = ?, setting_record = ?, event_record = ?, 
@@ -486,28 +484,29 @@ class NovelAIAgent:
                              last_chap_summary = ?, global_summary = ?
                              WHERE novel_id = ? AND chapter_num = ?""", 
                           (new_setting, new_event, new_foreshadow, new_last_chap_summary, new_global_summary, novel_id, next_chap))
-                
                 self.conn.commit()
-                self.gui_log("✅ 記憶庫更新完成，並已建立本章【記憶快照】。")
-            else:
-                self.gui_log("⚠️ 記憶更新不完整，章節已存檔，將沿用舊記憶繼續。")
+                self.gui_log("✅ 記憶快照建立完成。")
 
-            # 5. 視覺化休息機制
-            self.gui_log("⏳ 本章完整流程結束。")
+            # ==========================================
+            # 循環過程 4. 休息 10 秒
+            # ==========================================
+            self.gui_log("⏳ 單章循環結束，準備進入下一個循環。")
             if not self.is_running:
                 break
                 
-            self.gui_log("機器開始散熱休息...")
-            for i in range(15, 0, -1): # 因為運算變少了，休息時間可以縮短到 15 秒
+            for i in range(10, 0, -1):
                 if not self.is_running: 
                     break 
                 self.update_status(f"狀態：機器散熱休息中... 剩餘 {i} 秒", "green")
                 time.sleep(1)
             
+            # ==========================================
+            # 循環過程 5. 回到循環過程(1.) (While 迴圈自動處理)
+            # ==========================================
             if self.is_running:
                 self.update_status("狀態：爆肝創作中...", "red")
 
-        self.gui_log("🛑 系統已安全暫停，所有進度皆已儲存。")
+        self.gui_log("🛑 系統已安全暫停。")
         self.update_status("狀態：待命中心", "blue")
         self.root.after(0, lambda: self.novel_combo.config(state="readonly"))
 
