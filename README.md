@@ -194,7 +194,3 @@ MIT License
 Created as an experiment in **AI autonomous storytelling and long-memory narrative systems**.
 
 
-
-
-
-看起來會像 **幾千星的 AI 專案**。
