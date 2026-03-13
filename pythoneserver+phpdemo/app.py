@@ -15,8 +15,8 @@ DB_NAME = "novel_agent_v5.db"
 
 # 🌐 網站同步設定 🌐
 # 替換成你網站實際的 api.php 網址
-WEB_API_URL = "https://替換成你網站實際的 api.php 網址.php" 
-WEB_API_KEY = "替換成你的KEY 然後記得網站也要一樣"
+WEB_API_URL = "替換成你網站實際的 api.php 網址" 
+WEB_API_KEY = "dragoncat_super_secret_key_2024"
 
 class NovelAIAgent:
     def __init__(self, root):
@@ -403,8 +403,9 @@ class NovelAIAgent:
         c = self.conn.cursor()
         novel_id = self.current_novel_id
 
+
         while self.is_running:
-            # --- 準備階段：讀取資料庫狀態 ---
+        # --- 準備階段：讀取資料庫狀態 ---
             c.execute("""SELECT name, setting, setting_record, event_record, foreshadow_record, 
                                 last_chap_summary, global_summary, saved_context 
                          FROM novels WHERE id=?""", (novel_id,))
@@ -414,22 +415,37 @@ class NovelAIAgent:
             max_chap = c.fetchone()[0]
             next_chap = (max_chap or 0) + 1
 
+            # 👇 這裡新增：抓取上一章的具體正文
+            last_chapter_content = ""
+            if max_chap and max_chap > 0:
+                c.execute("SELECT content FROM chapters WHERE novel_id=? AND chapter_num=?", (novel_id, max_chap))
+                row = c.fetchone()
+                if row and row[0]:
+                    # 為了節省 Token 並讓 AI 專注於銜接，我們只取上一章的最後 1500 字
+                    # 如果你希望餵入完整全章，可以改成 last_chapter_content = row[0]
+                    last_chapter_content = row[0][-1500:] 
+
             self.gui_log(f"\n=======================")
             self.gui_log(f"📝 開始執行循環：準備創作第 {next_chap} 章")
             
             style_match = re.search(r'【作品風格走向】：(.*?)\n', setting)
             current_style = style_match.group(1) if style_match else "一般網文"
 
+            # 👇 這裡更新：將上一章原文無縫融合進 Context 中
             if next_chap == 1:
                 self.gui_log("🌟 檢測為第一章，使用初始資料進行開局創作...")
                 context = f"【初始設定】：\n{setting}\n\n請根據以上設定，撰寫第一章正文。"
             else:
-                self.gui_log("📖 結合前一章三維資訊與摘要，進行延續創作...")
+                self.gui_log("📖 結合前一章末段原文與三維資訊，進行無縫延續創作...")
                 context = (
                     f"【初始設定】：\n{setting}\n\n"
-                    f"【目前世界觀與全局狀態 (三維資訊)】：\n{global_summary}\n\n"
-                    f"【上一章詳細摘要】：\n{last_chap_summary}\n\n"
-                    f"請緊密銜接上一章的劇情，撰寫第 {next_chap} 章正文。"
+                    f"【目前世界觀與全局狀態】：\n{global_summary}\n\n"
+                    f"【上一章劇情摘要 (幫助你理解前情提要)】：\n{last_chap_summary}\n\n"
+                    f"====================\n"
+                    f"【上一章結尾原文 (請從這裡緊密往下銜接)】：\n"
+                    f"...(前略)...\n{last_chapter_content}\n"
+                    f"====================\n\n"
+                    f"【寫作指令】：請緊密銜接【上一章結尾原文】的最後一句話與當下場景氣氛，自然地往下撰寫第 {next_chap} 章正文。"
                 )
             
             c.execute("UPDATE novels SET saved_context = ? WHERE id = ?", (context, novel_id))
@@ -442,7 +458,7 @@ class NovelAIAgent:
             outline_sys_prompt = (
                 f"你是一位專業的小說企劃。這部小說的核心風格是『{current_style}』。\n"
                 f"請根據提供的上下文，為即將撰寫的第 {next_chap} 章設計出精彩且結構完整的「劇情綱要」。\n"
-                f"請條理分明地列出本章的起承轉合，以及重要角色的互動重點。"
+                f"請條理分明地列出本章故事劇情，以及重要角色的互動重點。"
             )
             outline_content = self.call_ai_with_retry(f"第{next_chap}章綱要", outline_sys_prompt, context)
             if not outline_content:
@@ -450,15 +466,16 @@ class NovelAIAgent:
                 self.stop_ai()
                 break
 
-            # 步驟 2：【上文 A + 劇情綱要 -> 寫出初稿】
+ # 步驟 2：【上文 A + 劇情綱要 -> 寫出初稿】
             self.gui_log("✍️ [步驟 2] 根據綱要撰寫本章初稿...")
             writer_sys_prompt = (
                 f"你是一位頂級的網路小說家。\n"
                 f"【最高指令】：本作品的核心風格為『{current_style}』！\n"
-                f"你的遣詞造句、情境描寫與劇情節奏，都必須死死咬住這個風格，絕對不能寫成平庸無聊的流水帳。"
+                f"你的遣詞造句、情境描寫與劇情節奏，都必須死死咬住這個風格，絕對不能寫成平庸無聊的流水帳。\n"
+                f"【排版警告】：這是一篇正式的小說正文，不是企劃書！**絕對不可**在內文中出現「起」、「承」、「轉」、「合」或「第一幕」等任何結構性的小標題。請將劇情自然地融合成一篇連貫的文章。"
             )
             # 將上文 (context) 與剛剛生成的綱要 (outline_content) 結合
-            draft_prompt = f"{context}\n\n【本章劇情綱要】：\n{outline_content}\n\n請嚴格遵守上述設定與劇情綱要，撰寫第 {next_chap} 章的完整初稿正文。"
+            draft_prompt = f"{context}\n\n【本章劇情綱要】：\n{outline_content}\n\n請嚴格遵守上述設定與劇情綱要，撰寫第 {next_chap} 章的完整初稿正文，並再次提醒：不要輸出任何段落小標題。"
             
             draft_content = self.call_ai_with_retry(f"第{next_chap}章初稿", writer_sys_prompt, draft_prompt)
             if not draft_content:
@@ -473,7 +490,8 @@ class NovelAIAgent:
                 f"請將以下的小說初稿進行深度優化與潤飾，提升文筆流暢度、加強動作神態與環境渲染。\n"
                 f"【嚴格規定】：\n"
                 f"1. 絕對不可改變原本的劇情走向、事件結果與人物對話核心意思。\n"
-                f"2. 請直接輸出潤飾後的完整小說正文，不要加上任何評論或廢話。"
+                f"2. 若初稿中殘留了「起」、「承」、「轉」、「合」或任何類似大綱的段落小標題，請【務必將其直接刪除】，讓段落與段落之間無縫接軌、自然過渡。\n"
+                f"3. 請直接輸出潤飾後的完整小說正文，不要加上任何評論或廢話。"
             )
             # 這裡只傳入初稿內容，不再包含上文 A
             content = self.call_ai_with_retry(f"第{next_chap}章潤飾", polish_sys_prompt, f"【需要潤飾的初稿】：\n{draft_content}")
@@ -503,85 +521,82 @@ class NovelAIAgent:
             self.gui_log("🌐 正在將最新章節同步上傳至網站...")
             self.sync_to_website(novel_name, setting, next_chap, full_title, content, global_summary)
 
-            self.gui_log("🌍 讀取最新章節，提煉並更新核心記憶庫 (狀態/事件/伏筆)...")
-            
-            combo_sys = (
+            # ================= 核心記憶庫拆分更新開始 =================
+            self.gui_log("🌍 讀取最新章節，分別更新核心記憶庫 (設定/事件/伏筆)...")
+
+            # 1. 獨立更新【設定狀態】 (準備存入 setting_record)
+            self.gui_log("🔍 [1/3] 更新設定狀態...")
+            setting_sys = (
                 f"你是一位頂級的劇情統籌編輯。這部小說的風格是：【{current_style}】。\n"
-                "你的任務是根據【舊有記憶】與【最新一章正文】，更新並整理出最精準的「最新記憶狀態」。\n"
-                "【核心原則：去蕪存菁】：\n"
-                "1. 保留尚未解決的重要資訊（如長期目標、未解謎團）。\n"
-                "2. 保留舊資訊但需依時間線排列清楚,可以簡化舊資訊但不能刪除（如敵人死亡、任務完成、伏筆解開，請將其標註清楚）。\n"
-                "3. 加入最新章節帶來的新變化。\n"
-                "【最高指令】：嚴格使用指定的 XML 標籤包覆內容，不要輸出標籤以外的廢話。\n\n"
-                "請按以下格式輸出：\n"
-                "<SETTING>\n這裡填寫：\n- 主角當前狀態 (詳細修為/等級/心境/受傷狀況)\n- 核心裝備與重要財產清單\n- 友軍與重要配角名單及當前位置\n- 世界觀或地圖環境變動\n</SETTING>\n"
-                "<EVENT>\n這裡填寫：\n- 目前正在進行的主要任務或目標\n- 近期發生的重大事件與戰鬥結果\n- 當前遭遇的困境或敵對勢力動向\n</EVENT>\n"
-                "<FORESHADOW>\n這裡填寫：\n- 尚未解開的謎團\n- 刻意留下的懸念與未來的衝突點\n</FORESHADOW>\n"
-                "<SUMMARY>\n這裡填寫：\n- 將上述資訊融合成一段約 300 字的「全局劇情總覽」。\n- 這段文字將作為 AI 寫下一章時的最高指導原則，必須精煉、連貫且具備劇情推進的方向性。\n</SUMMARY>"
+                "請根據【舊有設定】與【最新一章正文】，更新主角狀態、修為、裝備、友軍位置與世界觀變動。\n"
+                "請直接輸出更新後的內容，不要加上任何評論或 XML 標籤。"
             )
-            
-            combo_user = (
-                f"【舊有設定與狀態】：\n{setting_record}\n\n"
-                f"【舊有事件與任務】：\n{event_record}\n\n"
-                f"【舊有伏筆與懸念】：\n{foreshadow_record}\n\n"
-                f"====================\n"
-                f"【剛寫好的最新章節正文】：\n{content}\n"
-                f"====================\n"
-                "請根據以上資訊，仔細比對並輸出更新後的 <SETTING>、<EVENT>、<FORESHADOW> 與 <SUMMARY>。"
+            setting_user = f"【舊有設定】：\n{setting_record}\n\n【最新一章正文】：\n{content}\n\n請輸出更新後的設定："
+            new_setting = self.call_ai_with_retry("更新設定", setting_sys, setting_user) 
+            new_setting = new_setting.strip() if new_setting else setting_record
+
+            # 2. 獨立更新【事件紀錄】 (準備存入 event_record)
+            self.gui_log("🔍 [2/3] 更新事件紀錄...")
+            event_sys = (
+                f"你是一位頂級的劇情統籌編輯。這部小說的風格是：【{current_style}】。\n"
+                "請根據【舊有事件】與【最新一章正文】，更新主要任務、重大事件與戰鬥結果。\n"
+                "請保留舊資訊並依時間線排列，已完成的任務請標註。直接輸出內容，不要加上任何評論或 XML 標籤。"
             )
+            event_user = f"【舊有事件】：\n{event_record}\n\n【最新一章正文】：\n{content}\n\n請輸出更新後的事件："
+            new_event = self.call_ai_with_retry("更新事件", event_sys, event_user)
+            new_event = new_event.strip() if new_event else event_record
 
-            memory_res = self.call_ai_with_retry("更新核心記憶庫", combo_sys, combo_user)
-            
-            new_setting, new_event, new_foreshadow, new_global_summary = setting_record, event_record, foreshadow_record, global_summary
-            update_success = False
+            # 3. 獨立更新【伏筆紀錄】 (準備存入 foreshadow_record)
+            self.gui_log("🔍 [3/3] 更新伏筆紀錄...")
+            foreshadow_sys = (
+                f"你是一位頂級的劇情統籌編輯。這部小說的風格是：【{current_style}】。\n"
+                "請根據【舊有伏筆】與【最新一章正文】，更新尚未解開的謎團與懸念。\n"
+                "若伏筆在最新章已解開，請刪除或標註已解開。直接輸出內容，不要加上任何評論或 XML 標籤。"
+            )
+            foreshadow_user = f"【舊有伏筆】：\n{foreshadow_record}\n\n【最新一章正文】：\n{content}\n\n請輸出更新後的伏筆："
+            new_foreshadow = self.call_ai_with_retry("更新伏筆", foreshadow_sys, foreshadow_user)
+            new_foreshadow = new_foreshadow.strip() if new_foreshadow else foreshadow_record
 
-            if memory_res:
-                try:
-                    # 使用正則表達式 (Regex) 安全提取標籤內的內容，無視 AI 輸出的多餘換行或廢話
-                    setting_match = re.search(r'<SETTING>(.*?)</SETTING>', memory_res, re.DOTALL | re.IGNORECASE)
-                    event_match = re.search(r'<EVENT>(.*?)</EVENT>', memory_res, re.DOTALL | re.IGNORECASE)
-                    foreshadow_match = re.search(r'<FORESHADOW>(.*?)</FORESHADOW>', memory_res, re.DOTALL | re.IGNORECASE)
-                    summary_match = re.search(r'<SUMMARY>(.*?)</SUMMARY>', memory_res, re.DOTALL | re.IGNORECASE)
+            # 4. 根據以上三個新資料，生成【全局劇情總覽】 (準備存入 global_summary)
+            self.gui_log("📝 統整最新資訊，生成全局劇情總覽...")
+            summary_sys = (
+                f"你是一位頂級的劇情統籌編輯。這部小說的風格是：【{current_style}】。\n"
+                "請將以下最新的設定、事件與伏筆資訊，融合成一段約 300 字的「全局劇情總覽」。\n"
+                "這段文字將作為 AI 寫下一章時的最高指導原則，必須精煉、連貫且具備劇情推進的方向性。直接輸出內容即可。"
+            )
+            summary_user = f"【最新設定】：\n{new_setting}\n\n【最新事件】：\n{new_event}\n\n【最新伏筆】：\n{new_foreshadow}\n\n請輸出全局總覽："
+            new_global_summary = self.call_ai_with_retry("更新總覽", summary_sys, summary_user)
+            new_global_summary = new_global_summary.strip() if new_global_summary else global_summary
 
-                    if setting_match and event_match and foreshadow_match and summary_match:
-                        new_setting = setting_match.group(1).strip()
-                        new_event = event_match.group(1).strip()
-                        new_foreshadow = foreshadow_match.group(1).strip()
-                        new_global_summary = summary_match.group(1).strip()
-                        update_success = True
-                        self.gui_log("✅ 核心記憶庫 (設定/事件/伏筆/總覽) 更新成功！格式完美。")
-                    else:
-                        self.gui_log("⚠️ AI 未依格式輸出完整標籤，將保留舊有資訊以防記憶損壞。")
-                        self.gui_log(f"🕵️ Debug 輸出預覽: {memory_res[:150]}...")
-                except Exception as e:
-                    self.gui_log(f"⚠️ 核心記憶庫解析異常: {e}，啟動安全防護，保留舊有資訊。")
-
-            self.gui_log("🧠 讀取最新章節，生成單章詳細摘要...")
+            # 5. 生成【單章詳細摘要】 (準備存入 last_chap_summary)
+            self.gui_log("🧠 生成單章詳細摘要...")
             single_sum_sys = (
                 f"你是一位極其細心的紀錄員。這部小說的風格是【{current_style}】。\n"
-                "請將這章內容濃縮為『單章詳細摘要』。除了記錄發生的事件外，"
-                "請務必保留『人物的決策、情緒反應與伏筆細節』，這將直接提供給下一章的作者作為上下文銜接。"
+                "請將這章內容濃縮為『單章詳細摘要』。請保留人物的決策、情緒反應與伏筆細節，這將提供給下一章作上下文銜接。"
             )
-            new_last_chap_summary = self.call_ai_with_retry("單章摘要生成", single_sum_sys, f"剛寫好的章節內容：\n{content}")
+            new_last_chap_summary = self.call_ai_with_retry("單章摘要", single_sum_sys, f"剛寫好的章節內容：\n{content}")
+            new_last_chap_summary = new_last_chap_summary.strip() if new_last_chap_summary else last_chap_summary
 
-            if new_last_chap_summary:
-                c.execute("""UPDATE novels SET 
-                             last_chap_summary = ?, setting_record = ?, event_record = ?, 
-                             foreshadow_record = ?, global_summary = ?
-                             WHERE id = ?""", 
-                          (new_last_chap_summary, new_setting, new_event, new_foreshadow, new_global_summary, novel_id))
-                
-                c.execute("""UPDATE chapters SET 
-                             setting_record = ?, event_record = ?, foreshadow_record = ?, 
-                             last_chap_summary = ?, global_summary = ?
-                             WHERE novel_id = ? AND chapter_num = ?""", 
-                          (new_setting, new_event, new_foreshadow, new_last_chap_summary, new_global_summary, novel_id, next_chap))
-                self.conn.commit()
-                
-                if update_success:
-                    self.gui_log("✅ 最新記憶快照已完美覆蓋。")
-                else:
-                    self.gui_log("⚠️ 已使用舊記憶作為本章的保底快照，確保時光倒流不斷鏈。")
+            # ================= 存入原先資料庫的位置 =================
+            self.gui_log("💾 將拆分處理好的記憶，分別存入原對應的資料庫欄位...")
+            
+            # 更新 novels 表 (完全沿用你原本的寫法)
+            c.execute("""UPDATE novels SET 
+                         last_chap_summary = ?, setting_record = ?, event_record = ?, 
+                         foreshadow_record = ?, global_summary = ?
+                         WHERE id = ?""", 
+                      (new_last_chap_summary, new_setting, new_event, new_foreshadow, new_global_summary, novel_id))
+            
+            # 更新 chapters 表 (完全沿用你原本的寫法，作為歷史快照)
+            c.execute("""UPDATE chapters SET 
+                         setting_record = ?, event_record = ?, foreshadow_record = ?, 
+                         last_chap_summary = ?, global_summary = ?
+                         WHERE novel_id = ? AND chapter_num = ?""", 
+                      (new_setting, new_event, new_foreshadow, new_last_chap_summary, new_global_summary, novel_id, next_chap))
+            
+            self.conn.commit()
+            self.gui_log("✅ 核心記憶庫已完美更新並存檔！(維持原有資料庫架構)")
+            # ================= 核心記憶庫拆分更新結束 =================
 
             self.gui_log("⏳ 單章循環結束，準備進入下一個循環。")
             if not self.is_running:
