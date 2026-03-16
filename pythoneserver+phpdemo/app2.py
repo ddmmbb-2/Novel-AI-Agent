@@ -15,7 +15,7 @@ DB_NAME = "novel_agent_v5.db"
 
 # 🌐 網站同步設定 🌐
 # 替換成你網站實際的 api.php 網址
-WEB_API_URL = "https://ddmmbb.synology.me/nbt/novelai/api.php" 
+WEB_API_URL = "替換成你網站實際的 api.php 網址" 
 WEB_API_KEY = "dragoncat_super_secret_key_2024"
 
 class NovelAIAgent:
