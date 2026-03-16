@@ -100,6 +100,13 @@ Novel-AI-Agent is a comprehensive **AI storytelling ecosystem** featuring long-t
 python app.py
 
 ```
+pythoneserver+phpdemo 為 本機創作與雲端(簡易版)發布的實作
+並另外提供 app2.py 此為半自動模式
+每一張都需要人為的撰寫劇本
+再交由 ollama 完成初稿->潤飾 兩階段創作後再發布
+主要是因為交給AI全部創作發現作品質量其實並不高
+還是需要人為的參與才行
+
 
 * 建立新書 ➔ 選擇模型 ➔ 點擊 **"▶ 開始自動創作"**，您的作品將會即時出現在網頁上！
 
