@@ -15,7 +15,7 @@ DB_NAME = "novel_agent_v5.db"
 
 # 🌐 網站同步設定 🌐
 # 替換成你網站實際的 api.php 網址
-WEB_API_URL = "替換成你網站實際的 api.php 網址" 
+WEB_API_URL = " 替換成你網站實際的 api.php 網址" 
 WEB_API_KEY = "dragoncat_super_secret_key_2024"
 
 class NovelAIAgent:
@@ -25,6 +25,7 @@ class NovelAIAgent:
         self.root.geometry("1400x850")
         self.is_running = False
         self.current_novel_id = None
+        self.current_reading_chapter_num = None
         
         self.available_models = self.fetch_ollama_models()
         self.current_model = self.available_models[0] if self.available_models else "gemma3:12b"
@@ -108,6 +109,11 @@ class NovelAIAgent:
         tk.Label(self.read_frame, text="📖 閱讀區 (繁體中文)", font=("Arial", 10, "bold")).pack(pady=5)
         self.read_area = scrolledtext.ScrolledText(self.read_frame, wrap=tk.WORD, width=40, font=("Microsoft JhengHei", 12), spacing3=10)
         self.read_area.pack(fill=tk.BOTH, expand=1)
+        
+        # 💡 新增：儲存並同步按鈕
+        self.save_edit_btn = tk.Button(self.read_frame, text="💾 儲存修改並重新同步至網站", command=self.save_and_sync_edit, bg="#f39c12", fg="white", font=("Arial", 10, "bold"))
+        self.save_edit_btn.pack(fill=tk.X, pady=5)
+
         self.main_pane.add(self.read_frame)
 
         btn_frame = tk.Frame(self.root)
@@ -241,7 +247,9 @@ class NovelAIAgent:
         if not selection: return
         index = selection[0]
         chapter_text = self.chapter_listbox.get(index)
-        chapter_num = re.search(r'第 (\d+) 章', chapter_text).group(1)
+        chapter_num = int(re.search(r'第 (\d+) 章', chapter_text).group(1)) # 轉成整數
+        
+        self.current_reading_chapter_num = chapter_num # 💡 新增：記錄下來給儲存按鈕用
         
         c = self.conn.cursor()
         c.execute("SELECT title, content FROM chapters WHERE novel_id = ? AND chapter_num = ?", (self.current_novel_id, chapter_num))
@@ -289,6 +297,59 @@ class NovelAIAgent:
         self.gui_log(f"⏪ 時光倒流成功！準備從頭覆寫。 (注意：網站端的舊章節需手動清理)")
         self.refresh_chapter_list()
         self.read_area.delete(1.0, tk.END)
+
+    def save_and_sync_edit(self):
+        # 防呆檢查
+        if not self.current_novel_id or not self.current_reading_chapter_num:
+            messagebox.showwarning("警告", "請先在左側選擇一個章節進行閱讀與修改！")
+            return
+
+        if self.is_running:
+            messagebox.showwarning("警告", "AI 正在創作中，請暫停後再執行此操作！")
+            return
+
+        # 取得文字框內的全部內容
+        raw_text = self.read_area.get("1.0", tk.END).strip()
+        if not raw_text:
+            return
+
+        # 解析標題與內文 (因為我們顯示時有加上【標題】)
+        match = re.match(r'【(.*?)】\n+(.*)', raw_text, re.DOTALL)
+        if match:
+            title = match.group(1).strip()
+            content = match.group(2).strip()
+        else:
+            # 如果使用者不小心把【】刪掉了，就給個保底標題
+            title = f"第{self.current_reading_chapter_num}章"
+            content = raw_text
+
+        if not messagebox.askyesno("確認儲存", f"確定要儲存【第 {self.current_reading_chapter_num} 章】的修改，並重新同步到網站嗎？"):
+            return
+
+        # 1. 更新本地資料庫
+        c = self.conn.cursor()
+        c.execute("UPDATE chapters SET title=?, content=? WHERE novel_id=? AND chapter_num=?",
+                  (title, content, self.current_novel_id, self.current_reading_chapter_num))
+        self.conn.commit()
+
+        # 2. 獲取網站同步所需的資訊
+        c.execute("SELECT name, setting, global_summary FROM novels WHERE id=?", (self.current_novel_id,))
+        novel = c.fetchone()
+        if novel:
+            novel_name, setting, global_summary = novel
+            self.gui_log(f"📝 已儲存【第 {self.current_reading_chapter_num} 章】的本地修改，準備上傳...")
+            
+            # 3. 開啟執行緒呼叫同步函數 (避免畫面卡住)
+            threading.Thread(target=self.sync_to_website, args=(novel_name, setting, self.current_reading_chapter_num, title, content, global_summary), daemon=True).start()
+            
+            self.refresh_chapter_list() # 更新左側清單 (以防使用者改了標題)
+            messagebox.showinfo("成功", "本地修改已儲存，並開始同步至網站！")
+
+
+
+
+
+
 
     def call_ai_with_retry(self, stage, system_p, user_p, retries=3):
         full_system_p = system_p + "\n【重要指令】：請務必使用繁體中文 (Traditional Chinese) 回覆，嚴禁簡體字。"
@@ -600,6 +661,10 @@ class NovelAIAgent:
             self.is_running = False
             self.update_status("狀態：待命中心 (請輸入下一章綱要)", "blue")
             self.root.after(0, lambda: self.novel_combo.config(state="readonly"))
+
+
+
+
 
 if __name__ == "__main__":
     root = tk.Tk()
